@@ -64,7 +64,7 @@ export default function App() {
             }}
             className="font-display text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0"
           >
-            LensBridge
+            Heylo-Free Video Calling
           </a>
 
           {/* Zone 2: Concise single-line navigation links */}
