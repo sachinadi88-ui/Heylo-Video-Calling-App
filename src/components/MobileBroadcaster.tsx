@@ -89,6 +89,7 @@ export function MobileBroadcaster({
   const mainLocalVideoRef = useRef<HTMLVideoElement | null>(null);
   const pipVideoRef = useRef<HTMLVideoElement | null>(null);
   const hadNativeFsRef = useRef(false);
+  const autoFullscreenTriggeredRef = useRef(false);
 
   const [scannerOpen, setScannerOpen] = useState(false);
   const [pocketDim, setPocketDim] = useState(false);
@@ -272,6 +273,27 @@ export function MobileBroadcaster({
       document.body.style.overflow = '';
     };
   }, [isFullscreen]);
+
+  // Automatically enter fullscreen when call connects; return to normal when call ends
+  useEffect(() => {
+    if (stage === 'live' && remoteStream) {
+      if (!autoFullscreenTriggeredRef.current) {
+        autoFullscreenTriggeredRef.current = true;
+        void enterFullscreen();
+      }
+    } else if (
+      stage === 'idle' ||
+      stage === 'waiting-for-peer' ||
+      stage === 'error'
+    ) {
+      if (autoFullscreenTriggeredRef.current) {
+        autoFullscreenTriggeredRef.current = false;
+        if (isFullscreen) {
+          void exitFullscreen();
+        }
+      }
+    }
+  }, [stage, remoteStream, enterFullscreen, exitFullscreen, isFullscreen]);
 
   const handleUnblockAudio = () => {
     setIsSpeakerMuted(false);

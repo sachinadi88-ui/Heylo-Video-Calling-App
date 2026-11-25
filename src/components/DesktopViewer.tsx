@@ -100,6 +100,7 @@ export function DesktopViewer({
   const waitingPreviewRef = useRef<HTMLVideoElement | null>(null);
   const stageContainerRef = useRef<HTMLDivElement | null>(null);
   const hadNativeFsRef = useRef(false);
+  const autoFullscreenTriggeredRef = useRef(false);
 
   const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
@@ -255,6 +256,27 @@ export function DesktopViewer({
       document.body.style.overflow = '';
     };
   }, [isFullscreen]);
+
+  // Automatically enter fullscreen when call connects; return to normal when call ends
+  useEffect(() => {
+    if (stage === 'live' && remoteStream) {
+      if (!autoFullscreenTriggeredRef.current) {
+        autoFullscreenTriggeredRef.current = true;
+        void enterFullscreen();
+      }
+    } else if (
+      stage === 'idle' ||
+      stage === 'waiting-for-peer' ||
+      stage === 'error'
+    ) {
+      if (autoFullscreenTriggeredRef.current) {
+        autoFullscreenTriggeredRef.current = false;
+        if (isFullscreen) {
+          void exitFullscreen();
+        }
+      }
+    }
+  }, [stage, remoteStream, enterFullscreen, exitFullscreen, isFullscreen]);
 
   const handleUnblockAudio = () => {
     setIsSpeakerMuted(false);
