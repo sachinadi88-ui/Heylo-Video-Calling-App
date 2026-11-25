@@ -19,7 +19,7 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import {useEffect, useRef, useState} from 'react';
+import {useCallback, useEffect, useRef, useState} from 'react';
 import type {
   CameraFacingMode,
   ConnectionStage,
@@ -99,6 +99,7 @@ export function DesktopViewer({
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const waitingPreviewRef = useRef<HTMLVideoElement | null>(null);
   const stageContainerRef = useRef<HTMLDivElement | null>(null);
+  const hadNativeFsRef = useRef(false);
 
   const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
@@ -170,13 +171,90 @@ export function DesktopViewer({
     }
   }, [localStream, remoteStream, showSelfView, cameraEnabled]);
 
+  const exitFullscreen = useCallback(async () => {
+    setIsFullscreen(false);
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element | null;
+      webkitExitFullscreen?: () => Promise<void> | void;
+    };
+    try {
+      if (document.fullscreenElement && document.exitFullscreen) {
+        await document.exitFullscreen();
+      } else if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
+        await doc.webkitExitFullscreen();
+      }
+    } catch {
+      // Ignore native fullscreen exit errors
+    }
+  }, []);
+
+  const enterFullscreen = useCallback(async () => {
+    setIsFullscreen(true);
+    const el = stageContainerRef.current as
+      | (HTMLDivElement & {webkitRequestFullscreen?: () => Promise<void> | void})
+      | null;
+    if (!el) return;
+    try {
+      if (el.requestFullscreen) {
+        await el.requestFullscreen();
+      } else if (el.webkitRequestFullscreen) {
+        await el.webkitRequestFullscreen();
+      }
+    } catch {
+      // Fallback CSS viewport fullscreen remains active via isFullscreen state
+    }
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    if (isFullscreen) {
+      void exitFullscreen();
+    } else {
+      void enterFullscreen();
+    }
+  }, [enterFullscreen, exitFullscreen, isFullscreen]);
+
+  // Sync native fullscreen exit (Esc / Android back) and support Esc in CSS fullscreen mode
   useEffect(() => {
     const onFsChange = () => {
-      setIsFullscreen(Boolean(document.fullscreenElement));
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+      };
+      const fsEl = document.fullscreenElement ?? doc.webkitFullscreenElement;
+      if (fsEl) {
+        hadNativeFsRef.current = true;
+        setIsFullscreen(true);
+      } else if (hadNativeFsRef.current) {
+        hadNativeFsRef.current = false;
+        setIsFullscreen(false);
+      }
     };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isFullscreen) {
+        void exitFullscreen();
+      }
+    };
+
     document.addEventListener('fullscreenchange', onFsChange);
-    return () => document.removeEventListener('fullscreenchange', onFsChange);
-  }, []);
+    document.addEventListener('webkitfullscreenchange', onFsChange);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange);
+      document.removeEventListener('webkitfullscreenchange', onFsChange);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [exitFullscreen, isFullscreen]);
+
+  useEffect(() => {
+    if (isFullscreen) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, [isFullscreen]);
 
   const handleUnblockAudio = () => {
     setIsSpeakerMuted(false);
@@ -185,20 +263,6 @@ export function DesktopViewer({
     if (video) {
       video.muted = false;
       video.play().catch(() => {});
-    }
-  };
-
-  const toggleFullscreen = async () => {
-    const el = stageContainerRef.current;
-    if (!el) return;
-    try {
-      if (!document.fullscreenElement) {
-        await el.requestFullscreen();
-      } else {
-        await document.exitFullscreen();
-      }
-    } catch {
-      // Ignore fullscreen denial
     }
   };
 
@@ -242,10 +306,14 @@ export function DesktopViewer({
           aria-label="Two-Way Video Call Stage"
           className="bg-[#131822] border border-white/[0.08] rounded-xl overflow-hidden"
         >
-          {/* Video Viewport */}
+          {/* Video Viewport (Hybrid native + mobile viewport fullscreen) */}
           <div
             ref={stageContainerRef}
-            className="relative aspect-video w-full bg-[#07090D] flex items-center justify-center overflow-hidden"
+            className={
+              isFullscreen
+                ? 'fixed inset-0 z-50 h-[100dvh] w-screen bg-[#07090D] flex items-center justify-center overflow-hidden pt-safe pb-safe'
+                : 'relative aspect-video w-full bg-[#07090D] flex items-center justify-center overflow-hidden'
+            }
           >
             {remoteStream ? (
               <>
@@ -333,7 +401,7 @@ export function DesktopViewer({
 
             {/* Top-left live status readout */}
             {isLive && (
-              <div className="pointer-events-none absolute top-3 left-3 flex items-center gap-2 rounded-md bg-black/65 backdrop-blur-sm px-2.5 py-1 text-xs font-medium text-white">
+              <div className="pointer-events-none absolute top-3 left-3 z-20 flex items-center gap-2 rounded-md bg-black/65 backdrop-blur-sm px-2.5 py-1 text-xs font-medium text-white">
                 <span className="h-2 w-2 rounded-full bg-emerald-400" />
                 <span>Live</span>
                 {remoteMeta && (
@@ -351,13 +419,30 @@ export function DesktopViewer({
               </div>
             )}
 
+            {/* Always-accessible Exit Fullscreen button inside fullscreen stage */}
+            {isFullscreen && (
+              <button
+                type="button"
+                onClick={toggleFullscreen}
+                aria-label="Exit full screen"
+                className="absolute top-3 right-3 z-30 min-h-[44px] px-3.5 rounded-xl bg-black/70 hover:bg-black/85 border border-white/25 text-xs font-medium text-white backdrop-blur-md inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              >
+                <Minimize2 className="w-4 h-4" />
+                <span>Exit Fullscreen</span>
+              </button>
+            )}
+
             {/* Autoplay-blocked audio unlock button */}
             {remoteStream && autoplayBlocked && (
-              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20">
+              <div
+                className={`absolute left-1/2 -translate-x-1/2 z-30 ${
+                  isFullscreen ? 'bottom-20' : 'bottom-4'
+                }`}
+              >
                 <button
                   type="button"
                   onClick={handleUnblockAudio}
-                  className="px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-medium text-white shadow-lg inline-flex items-center gap-2 transition-colors whitespace-nowrap"
+                  className="min-h-[44px] px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-medium text-white shadow-lg inline-flex items-center gap-2 transition-colors whitespace-nowrap"
                 >
                   <Volume2 className="w-4 h-4" />
                   Click to Enable Call Audio
@@ -367,7 +452,11 @@ export function DesktopViewer({
 
             {/* Local Self-View Picture-in-Picture during call */}
             {remoteStream && showSelfView && (
-              <div className="absolute bottom-3 right-3 z-10 w-36 sm:w-52 aspect-video rounded-lg overflow-hidden border border-white/15 bg-[#0B0E14] shadow-2xl">
+              <div
+                className={`absolute right-3 z-20 w-32 sm:w-52 aspect-video rounded-lg overflow-hidden border border-white/15 bg-[#0B0E14] shadow-2xl ${
+                  isFullscreen ? 'bottom-20' : 'bottom-3'
+                }`}
+              >
                 {hasLocalVideo ? (
                   <video
                     ref={localVideoRef}
@@ -392,6 +481,81 @@ export function DesktopViewer({
                     <MicOff className="w-3 h-3 text-red-400" />
                   )}
                 </div>
+              </div>
+            )}
+
+            {/* Floating In-Stage Call Controls when in Fullscreen mode */}
+            {isFullscreen && (
+              <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 px-3 py-2 rounded-2xl bg-black/75 border border-white/15 backdrop-blur-md max-w-[95vw] overflow-x-auto">
+                <button
+                  type="button"
+                  onClick={onToggleMic}
+                  className={`min-h-[40px] px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                    audioEnabled
+                      ? 'border-white/15 text-white hover:bg-white/10'
+                      : 'border-red-400/40 bg-red-500/25 text-red-100'
+                  }`}
+                >
+                  {audioEnabled ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
+                  <span>{audioEnabled ? 'Mic' : 'Muted'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={onToggleCamera}
+                  className={`min-h-[40px] px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                    cameraEnabled && cameraReady
+                      ? 'border-white/15 text-white hover:bg-white/10'
+                      : 'border-red-400/40 bg-red-500/25 text-red-100'
+                  }`}
+                >
+                  {cameraEnabled && cameraReady ? (
+                    <Video className="w-4 h-4" />
+                  ) : (
+                    <VideoOff className="w-4 h-4" />
+                  )}
+                  <span>{cameraEnabled && cameraReady ? 'Cam' : 'Off'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsSpeakerMuted((prev) => !prev);
+                    setAutoplayBlocked(false);
+                  }}
+                  disabled={!remoteStream}
+                  className="min-h-[40px] px-3 rounded-xl border border-white/15 text-xs font-medium text-white hover:bg-white/10 disabled:opacity-40 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                >
+                  {isSpeakerMuted ? (
+                    <VolumeX className="w-4 h-4" />
+                  ) : (
+                    <Volume2 className="w-4 h-4" />
+                  )}
+                  <span>{isSpeakerMuted ? 'Muted' : 'Sound'}</span>
+                </button>
+
+                {isInCall && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void exitFullscreen();
+                      onCreateNewRoom();
+                    }}
+                    className="min-h-[40px] px-3 rounded-xl bg-red-600 hover:bg-red-500 text-xs font-medium text-white inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                  >
+                    <PhoneOff className="w-4 h-4" />
+                    <span>End</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={toggleFullscreen}
+                  className="min-h-[40px] px-3 rounded-xl bg-white/15 hover:bg-white/25 text-xs font-medium text-white inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                >
+                  <Minimize2 className="w-4 h-4" />
+                  <span>Normal</span>
+                </button>
               </div>
             )}
           </div>

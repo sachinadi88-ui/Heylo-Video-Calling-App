@@ -230,6 +230,10 @@ export default function App() {
           />
         )}
       </main>
+
+      <footer className="border-t border-white/[0.06] py-2 px-4 text-center text-[11px] leading-none text-slate-500">
+        Created by Sachin Adi © 2026
+      </footer>
     </div>
   );
 }

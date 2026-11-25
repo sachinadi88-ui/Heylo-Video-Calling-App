@@ -2,8 +2,10 @@ import {
   Camera,
   EyeOff,
   Flashlight,
+  Maximize2,
   Mic,
   MicOff,
+  Minimize2,
   PhoneCall,
   PhoneOff,
   QrCode,
@@ -13,7 +15,7 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import {useEffect, useRef, useState} from 'react';
+import {useCallback, useEffect, useRef, useState} from 'react';
 import type {
   CameraFacingMode,
   ConnectionStage,
@@ -82,9 +84,11 @@ export function MobileBroadcaster({
   onJoinAndStream,
   onStopBroadcast,
 }: MobileBroadcasterProps) {
+  const stageContainerRef = useRef<HTMLElement | null>(null);
   const mainRemoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const mainLocalVideoRef = useRef<HTMLVideoElement | null>(null);
   const pipVideoRef = useRef<HTMLVideoElement | null>(null);
+  const hadNativeFsRef = useRef(false);
 
   const [scannerOpen, setScannerOpen] = useState(false);
   const [pocketDim, setPocketDim] = useState(false);
@@ -92,6 +96,7 @@ export function MobileBroadcaster({
   const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [swapViews, setSwapViews] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   const isStreamingOrWaiting =
     stage === 'waiting-for-peer' ||
@@ -182,6 +187,92 @@ export function MobileBroadcaster({
     }
   }, [autoJoinAttempted, cameraReady, onJoinAndStream, roomCode, stage]);
 
+  const exitFullscreen = useCallback(async () => {
+    setIsFullscreen(false);
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element | null;
+      webkitExitFullscreen?: () => Promise<void> | void;
+    };
+    try {
+      if (document.fullscreenElement && document.exitFullscreen) {
+        await document.exitFullscreen();
+      } else if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
+        await doc.webkitExitFullscreen();
+      }
+    } catch {
+      // Ignore native fullscreen exit errors
+    }
+  }, []);
+
+  const enterFullscreen = useCallback(async () => {
+    setIsFullscreen(true);
+    const el = stageContainerRef.current as
+      | (HTMLElement & {webkitRequestFullscreen?: () => Promise<void> | void})
+      | null;
+    if (!el) return;
+    try {
+      if (el.requestFullscreen) {
+        await el.requestFullscreen();
+      } else if (el.webkitRequestFullscreen) {
+        await el.webkitRequestFullscreen();
+      }
+    } catch {
+      // Fallback CSS viewport fullscreen remains active via isFullscreen state
+    }
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    if (isFullscreen) {
+      void exitFullscreen();
+    } else {
+      void enterFullscreen();
+    }
+  }, [enterFullscreen, exitFullscreen, isFullscreen]);
+
+  // Sync native fullscreen exit (Esc / Android back button) and lock background scroll
+  useEffect(() => {
+    const onFsChange = () => {
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+      };
+      const fsEl = document.fullscreenElement ?? doc.webkitFullscreenElement;
+      if (fsEl) {
+        hadNativeFsRef.current = true;
+        setIsFullscreen(true);
+      } else if (hadNativeFsRef.current) {
+        hadNativeFsRef.current = false;
+        setIsFullscreen(false);
+      }
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isFullscreen) {
+        void exitFullscreen();
+      }
+    };
+
+    document.addEventListener('fullscreenchange', onFsChange);
+    document.addEventListener('webkitfullscreenchange', onFsChange);
+    document.addEventListener('keydown', onKeyDown);
+
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange);
+      document.removeEventListener('webkitfullscreenchange', onFsChange);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [exitFullscreen, isFullscreen]);
+
+  useEffect(() => {
+    if (isFullscreen) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, [isFullscreen]);
+
   const handleUnblockAudio = () => {
     setIsSpeakerMuted(false);
     setAutoplayBlocked(false);
@@ -221,10 +312,15 @@ export function MobileBroadcaster({
   return (
     <div className="mx-auto w-full max-w-5xl px-4 sm:px-6 py-4 sm:py-6">
       <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px] gap-5 items-stretch">
-        {/* Two-Way Call Viewfinder */}
+        {/* Two-Way Call Viewfinder (Hybrid native + mobile viewport fullscreen) */}
         <section
+          ref={stageContainerRef}
           aria-label="Two-Way Video Call Viewfinder"
-          className="relative rounded-2xl bg-[#07090D] border border-white/[0.08] overflow-hidden min-h-[54vh] sm:min-h-[62vh] flex flex-col justify-between"
+          className={
+            isFullscreen
+              ? 'fixed inset-0 z-50 h-[100dvh] w-screen bg-[#07090D] overflow-hidden flex flex-col justify-between pt-safe pb-safe'
+              : 'relative rounded-2xl bg-[#07090D] border border-white/[0.08] overflow-hidden min-h-[54vh] sm:min-h-[62vh] flex flex-col justify-between'
+          }
         >
           {/* Main Background Video (Remote Caller when live, or Local Camera before joining) */}
           {remoteInMain ? (
@@ -234,9 +330,9 @@ export function MobileBroadcaster({
                 autoPlay
                 playsInline
                 muted={isSpeakerMuted}
-                className={`absolute inset-0 h-full w-full object-cover ${
-                  hasRemoteVideo ? 'opacity-100' : 'opacity-0'
-                }`}
+                className={`absolute inset-0 h-full w-full ${
+                  isFullscreen ? 'object-contain sm:object-cover' : 'object-cover'
+                } ${hasRemoteVideo ? 'opacity-100' : 'opacity-0'}`}
               />
               {!hasRemoteVideo && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center">
@@ -306,7 +402,7 @@ export function MobileBroadcaster({
               type="button"
               onClick={() => setSwapViews((prev) => !prev)}
               aria-label="Swap local and remote video views"
-              className="absolute top-14 right-3 z-20 w-28 sm:w-40 aspect-[3/4] sm:aspect-video rounded-xl overflow-hidden border border-white/25 bg-[#0B0E14] shadow-2xl text-left"
+              className="absolute top-[74px] right-3 z-20 w-24 sm:w-40 aspect-[3/4] sm:aspect-video rounded-xl overflow-hidden border border-white/25 bg-[#0B0E14] shadow-2xl text-left"
             >
               {remoteInMain ? (
                 hasLocalVideo ? (
@@ -353,11 +449,11 @@ export function MobileBroadcaster({
             </button>
           )}
 
-          {/* Top Scrim & Compact Status */}
-          <div className="relative z-10 flex items-center justify-between gap-3 px-4 py-3 bg-gradient-to-b from-black/75 via-black/35 to-transparent">
-            <div className="flex items-center gap-2 text-xs font-medium text-white">
+          {/* Top Scrim & Compact Status + Always-Reachable Fullscreen / Exit Button */}
+          <div className="relative z-10 flex items-center justify-between gap-2 px-4 py-3 bg-gradient-to-b from-black/80 via-black/40 to-transparent">
+            <div className="flex items-center gap-2 text-xs font-medium text-white min-w-0">
               <span
-                className={`h-2 w-2 rounded-full ${
+                className={`h-2 w-2 rounded-full shrink-0 ${
                   stage === 'live'
                     ? 'bg-emerald-400'
                     : isStreamingOrWaiting
@@ -365,35 +461,60 @@ export function MobileBroadcaster({
                       : 'bg-slate-400'
                 }`}
               />
-              <span>{statusText}</span>
+              <span className="truncate">{statusText}</span>
               {isStreamingOrWaiting && roomCode && (
                 <>
-                  <span className="text-white/40" aria-hidden="true">
+                  <span className="text-white/40 shrink-0" aria-hidden="true">
                     ·
                   </span>
-                  <span className="font-mono tracking-wider">{roomCode}</span>
+                  <span className="font-mono tracking-wider shrink-0">{roomCode}</span>
                 </>
               )}
               {stage === 'live' && remoteMeta?.audioEnabled === false && (
                 <>
-                  <span className="text-white/40" aria-hidden="true">
+                  <span className="text-white/40 shrink-0" aria-hidden="true">
                     ·
                   </span>
-                  <span className="text-amber-300">Host muted</span>
+                  <span className="text-amber-300 truncate">Host muted</span>
                 </>
               )}
             </div>
 
-            {wakeLockActive && stage === 'live' && (
+            <div className="flex items-center gap-2 shrink-0">
+              {wakeLockActive && stage === 'live' && (
+                <button
+                  type="button"
+                  onClick={() => setPocketDim(true)}
+                  className="min-h-[40px] px-3 rounded-xl bg-black/55 hover:bg-black/75 border border-white/15 text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 backdrop-blur-sm transition-colors whitespace-nowrap"
+                >
+                  <EyeOff className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Dim</span>
+                </button>
+              )}
+
               <button
                 type="button"
-                onClick={() => setPocketDim(true)}
-                className="min-h-[36px] px-2.5 rounded-lg bg-black/50 text-xs font-medium text-slate-200 hover:bg-black/70 inline-flex items-center gap-1.5"
+                onClick={toggleFullscreen}
+                aria-label={isFullscreen ? 'Exit full screen' : 'Enter full screen'}
+                className={`min-h-[40px] px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 backdrop-blur-sm transition-colors whitespace-nowrap ${
+                  isFullscreen
+                    ? 'bg-white/15 hover:bg-white/25 border-white/30 text-white'
+                    : 'bg-black/55 hover:bg-black/75 border-white/15 text-white'
+                }`}
               >
-                <EyeOff className="w-3.5 h-3.5" />
-                Dim Screen
+                {isFullscreen ? (
+                  <>
+                    <Minimize2 className="w-4 h-4" />
+                    <span>Exit</span>
+                  </>
+                ) : (
+                  <>
+                    <Maximize2 className="w-4 h-4" />
+                    <span>Full</span>
+                  </>
+                )}
               </button>
-            )}
+            </div>
           </div>
 
           {/* Autoplay Blocked Unmute Prompt */}
@@ -411,7 +532,7 @@ export function MobileBroadcaster({
           )}
 
           {/* Bottom Scrim & Thumb-Zone Quick Controls */}
-          <div className="relative z-10 flex flex-wrap items-center justify-between gap-2 px-4 py-3 bg-gradient-to-t from-black/80 via-black/45 to-transparent">
+          <div className="relative z-10 flex flex-wrap items-center justify-between gap-2 px-4 py-3 bg-gradient-to-t from-black/85 via-black/50 to-transparent">
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
@@ -485,6 +606,21 @@ export function MobileBroadcaster({
                   }`}
                 >
                   <Flashlight className="w-4 h-4" />
+                </button>
+              )}
+
+              {isFullscreen && isStreamingOrWaiting && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void exitFullscreen();
+                    onStopBroadcast();
+                  }}
+                  aria-label="Leave call"
+                  className="min-h-[44px] px-3 rounded-xl bg-red-600 hover:bg-red-500 text-xs font-medium text-white inline-flex items-center justify-center gap-1.5 transition-colors"
+                >
+                  <PhoneOff className="w-4 h-4" />
+                  <span>Leave</span>
                 </button>
               )}
             </div>
